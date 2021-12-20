@@ -12,7 +12,7 @@ import (
 )
 
 var broadcastAddr = net.UDPAddr{
-	IP:   []byte{0x02, 0xff, 0xff, 0xff},
+	IP:   []byte{192, 168, 2, 255},
 	Port: int(packet.ArtNetPort),
 }
 

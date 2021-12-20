@@ -78,6 +78,13 @@ func ArtPollReplyFromConfig(c NodeConfig) *packet.ArtPollReplyPacket {
 		Status2:     c.Status2,
 		NetSwitch:   c.BaseAddress.Net,
 		SubSwitch:   c.BaseAddress.SubUni,
+		NumPorts:    uint16(len(c.OutputPorts)),
+		PortTypes: [4]code.PortType{
+			code.PortType(0).WithOutput(true).WithType("DMX512"),
+			code.PortType(0),
+			code.PortType(0),
+			code.PortType(0),
+		},
 	}
 
 	copy(p.IPAddress[0:4], c.IP.To4())
