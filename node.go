@@ -118,7 +118,6 @@ func NewNode(name string, style code.StyleCode, interfaceName string, log Logger
 		Port: packet.ArtNetPort,
 		Zone: "",
 	}
-	fmt.Println(n.localAddr)
 
 	return n, nil
 }
