@@ -1,6 +1,8 @@
 package artnet
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/jsimonetti/go-artnet/packet"
 	"github.com/jsimonetti/go-artnet/packet/code"
+	"github.com/libp2p/go-reuseport"
 )
 
 // NodeCallbackFn gets called when a new packet has been received and needs to be processed
@@ -20,10 +23,11 @@ type Node struct {
 	Config NodeConfig
 
 	// conn is the UDP connection this node will listen on
-	conn      *net.UDPConn
-	localAddr net.UDPAddr
-	sendCh    chan netPayload
-	recvCh    chan netPayload
+	conn          *net.UDPConn
+	localAddr     net.UDPAddr
+	broadcastAddr net.UDPAddr
+	sendCh        chan netPayload
+	recvCh        chan netPayload
 
 	// shutdownCh will be closed on shutdown of the node
 	shutdownCh   chan struct{}
@@ -48,12 +52,22 @@ type netPayload struct {
 	data    []byte
 }
 
+func lastAddr(n *net.IPNet) (net.IP, error) { // works when the n is a prefix, otherwise...
+	if n.IP.To4() == nil {
+		return net.IP{}, errors.New("does not support IPv6 addresses")
+	}
+	ip := make(net.IP, len(n.IP.To4()))
+	binary.BigEndian.PutUint32(ip, binary.BigEndian.Uint32(n.IP.To4())|^binary.BigEndian.Uint32(net.IP(n.Mask).To4()))
+	return ip, nil
+}
+
 // NewNode return a Node
-func NewNode(name string, style code.StyleCode, ip net.IP, log Logger) *Node {
+func NewNode(name string, style code.StyleCode, interfaceName string, log Logger) (*Node, error) {
 	n := &Node{
 		Config: NodeConfig{
-			Name: name,
-			Type: style,
+			Name:      name,
+			Type:      style,
+			BindIndex: 1,
 		},
 		conn:     nil,
 		shutdown: true,
@@ -66,18 +80,47 @@ func NewNode(name string, style code.StyleCode, ip net.IP, log Logger) *Node {
 		code.OpPollReply: n.handlePacketPollReply,
 	}
 
-	if len(ip) < 1 {
-		// TODO: generate an IP according to spec
-		//ip = GenerateIP()
+	var ip net.IP
+	var broadcast net.IP
+
+	iface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		return nil, err
 	}
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	for _, addr := range addresses {
+		switch v := addr.(type) {
+		case *net.IPNet:
+			if v.IP.To4() != nil {
+				ip = v.IP
+				broadcast, err = lastAddr(v)
+				if err != nil {
+					return nil, fmt.Errorf("could not find broadcast addr: %e", err)
+				}
+				break
+			}
+		}
+	}
+	if len(ip) == 0 {
+		return nil, fmt.Errorf("interface %s has no IP addresses", interfaceName)
+	}
+
 	n.Config.IP = ip
+	n.broadcastAddr = net.UDPAddr{
+		IP:   broadcast,
+		Port: int(packet.ArtNetPort),
+	}
 	n.localAddr = net.UDPAddr{
 		IP:   ip,
 		Port: packet.ArtNetPort,
 		Zone: "",
 	}
+	fmt.Println(n.localAddr)
 
-	return n
+	return n, nil
 }
 
 // Stop will stop all running routines and close the network connection
@@ -110,7 +153,7 @@ func (n *Node) Start() error {
 	n.shutdownCh = make(chan struct{})
 	n.shutdown = false
 
-	c, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", packet.ArtNetPort))
+	c, err := reuseport.ListenPacket("udp4", fmt.Sprintf(":%d", packet.ArtNetPort))
 	if err != nil {
 		n.shutdownErr = fmt.Errorf("error net.ListenPacket: %s", err)
 		n.log.With(Fields{"error": err}).Error("error net.ListenPacket")
@@ -130,12 +173,17 @@ func (n *Node) Start() error {
 func (n *Node) pollReplyLoop() {
 	var timer time.Ticker
 
+	binaryPacket := [][]byte{}
+
 	// create an ArtPollReply packet to send out in response to an ArtPoll packet
-	p := ArtPollReplyFromConfig(n.Config)
-	me, err := p.MarshalBinary()
-	if err != nil {
-		n.log.With(Fields{"err": err}).Error("error creating ArtPollReply packet for self")
-		return
+	packets := ArtPollReplyFromConfig(n.Config)
+	for _, packet := range packets {
+		me, err := packet.MarshalBinary()
+		if err != nil {
+			n.log.With(Fields{"err": err}).Error("error creating ArtPollReply packet for self")
+			return
+		}
+		binaryPacket = append(binaryPacket, me)
 	}
 
 	// loop until shutdown
@@ -149,9 +197,11 @@ func (n *Node) pollReplyLoop() {
 			// reply with pollReply
 			n.log.With(nil).Debug("sending ArtPollReply")
 
-			n.sendCh <- netPayload{
-				address: broadcastAddr,
-				data:    me,
+			for _, me := range binaryPacket {
+				n.sendCh <- netPayload{
+					address: n.broadcastAddr,
+					data:    me,
+				}
 			}
 
 			// TODO: if we are asked to send changes regularly, set the Ticker here

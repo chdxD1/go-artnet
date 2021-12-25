@@ -24,6 +24,16 @@ func (a Address) Integer() int {
 	return int(uint16(a.Net)<<8 | uint16(a.SubUni))
 }
 
+// Integer returns the SubSwitch for this Address
+func (a Address) SubSwitch() uint8 {
+	return uint8(a.SubUni >> 4)
+}
+
+// Integer returns the bits 0-4 of this Address
+func (a Address) PortAddress() int {
+	return int(a.SubUni & 0x0f)
+}
+
 // InputPort contains information for an input port
 type InputPort struct {
 	Address Address
@@ -63,9 +73,7 @@ type NodeConfig struct {
 	OutputPorts []OutputPort
 }
 
-// ArtPollReplyFromConfig will return a ArtPollReplyPacket from the NodeConfig
-// TODO: make this a more complete packet by adding the other NodeConfig fields
-func ArtPollReplyFromConfig(c NodeConfig) *packet.ArtPollReplyPacket {
+func initArtPollReplyFromConfig(c NodeConfig, bindOffset uint8) *packet.ArtPollReplyPacket {
 	p := &packet.ArtPollReplyPacket{
 		OpCode:      code.OpPollReply,
 		Port:        packet.ArtNetPort,
@@ -73,14 +81,14 @@ func ArtPollReplyFromConfig(c NodeConfig) *packet.ArtPollReplyPacket {
 		VersionInfo: c.Version,
 		UBEAVersion: c.BiosVersion,
 		Style:       c.Type,
-		BindIndex:   c.BindIndex,
+		BindIndex:   c.BindIndex + bindOffset,
 		Status1:     c.Status1,
 		Status2:     c.Status2,
 		NetSwitch:   c.BaseAddress.Net,
-		SubSwitch:   c.BaseAddress.SubUni,
-		NumPorts:    uint16(len(c.OutputPorts)),
+		SubSwitch:   c.BaseAddress.SubSwitch(),
+		NumPorts:    uint16(len(c.InputPorts) + len(c.OutputPorts)),
 		PortTypes: [4]code.PortType{
-			code.PortType(0).WithOutput(true).WithType("DMX512"),
+			code.PortType(0),
 			code.PortType(0),
 			code.PortType(0),
 			code.PortType(0),
@@ -96,6 +104,85 @@ func ArtPollReplyFromConfig(c NodeConfig) *packet.ArtPollReplyPacket {
 	copy(p.Macaddress[0:6], c.Ethernet)
 
 	return p
+}
+
+func multipleArtPollReplyFromConfig(c NodeConfig) []*packet.ArtPollReplyPacket {
+	packets := []*packet.ArtPollReplyPacket{}
+	bindOffset := 0
+
+	for _, port := range c.OutputPorts {
+		p := initArtPollReplyFromConfig(c, uint8(bindOffset))
+
+		p.NetSwitch = port.Address.Net
+		p.SubSwitch = port.Address.SubSwitch()
+		p.NumPorts = 1
+		p.SwOut[0] = uint8(port.Address.PortAddress())
+		p.PortTypes[0] = port.Type.WithOutput(true).WithInput(false)
+
+		packets = append(packets, p)
+
+		bindOffset += 1
+	}
+	for _, port := range c.InputPorts {
+		p := initArtPollReplyFromConfig(c, uint8(bindOffset))
+
+		p.NetSwitch = port.Address.Net
+		p.SubSwitch = port.Address.SubSwitch()
+		p.NumPorts = 1
+		p.SwIn[0] = uint8(port.Address.PortAddress())
+		p.PortTypes[0] = port.Type.WithOutput(false).WithInput(true)
+
+		packets = append(packets, p)
+
+		bindOffset += 1
+	}
+	return packets
+}
+
+func singleArtPollReplyFromConfig(c NodeConfig) *packet.ArtPollReplyPacket {
+	p := initArtPollReplyFromConfig(c, uint8(0))
+
+	portId := 0
+	for _, port := range c.OutputPorts {
+		p.SwOut[portId] = uint8(port.Address.PortAddress())
+		p.PortTypes[portId] = port.Type.WithOutput(true).WithInput(false)
+
+		portId += 1
+	}
+	for _, port := range c.InputPorts {
+		p.SwIn[portId] = uint8(port.Address.PortAddress())
+		p.PortTypes[portId] = port.Type.WithOutput(false).WithInput(true)
+
+		portId += 1
+	}
+	return p
+}
+
+func shouldGenerateSingleArtPollReply(c NodeConfig) bool {
+	if (len(c.InputPorts) + len(c.OutputPorts)) > 4 {
+		return false
+	}
+	for _, port := range c.OutputPorts {
+		if port.Address.Net != c.BaseAddress.Net || port.Address.SubSwitch() != c.BaseAddress.SubSwitch() {
+			return false
+		}
+	}
+	for _, port := range c.InputPorts {
+		if port.Address.Net != c.BaseAddress.Net || port.Address.SubSwitch() != c.BaseAddress.SubSwitch() {
+			return false
+		}
+	}
+	return true
+}
+
+// ArtPollReplyFromConfig will return a ArtPollReplyPacket from the NodeConfig
+// TODO: make this a more complete packet by adding the other NodeConfig fields
+func ArtPollReplyFromConfig(c NodeConfig) []*packet.ArtPollReplyPacket {
+	if shouldGenerateSingleArtPollReply(c) {
+		return []*packet.ArtPollReplyPacket{singleArtPollReplyFromConfig(c)}
+	} else {
+		return multipleArtPollReplyFromConfig(c)
+	}
 }
 
 // ConfigFromArtPollReply will return a Config from the information in the ArtPollReplyPacket

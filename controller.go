@@ -1,7 +1,6 @@
 package artnet
 
 import (
-	"bytes"
 	"fmt"
 	"net"
 	"sync"
@@ -10,11 +9,6 @@ import (
 	"github.com/jsimonetti/go-artnet/packet"
 	"github.com/jsimonetti/go-artnet/packet/code"
 )
-
-var broadcastAddr = net.UDPAddr{
-	IP:   []byte{192, 168, 2, 255},
-	Port: int(packet.ArtNetPort),
-}
 
 // we poll for new nodes every 3 seconds
 var pollInterval = 3 * time.Second
@@ -99,9 +93,14 @@ type Controller struct {
 }
 
 // NewController return a Controller
-func NewController(name string, ip net.IP, log Logger, opts ...Option) *Controller {
+func NewController(name string, interfaceName string, log Logger, opts ...Option) (*Controller, error) {
+	node, err := NewNode(name, code.StController, interfaceName, log)
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Controller{
-		cNode:  NewNode(name, code.StController, ip, log),
+		cNode:  node,
 		log:    log,
 		maxFPS: 1000,
 	}
@@ -110,7 +109,7 @@ func NewController(name string, ip net.IP, log Logger, opts ...Option) *Controll
 		c.SetOption(opt)
 	}
 
-	return c
+	return c, nil
 }
 
 // Start will start this controller
@@ -161,7 +160,7 @@ func (c *Controller) pollLoop() {
 
 	// send ArtPollPacket
 	c.cNode.sendCh <- netPayload{
-		address: broadcastAddr,
+		address: c.cNode.broadcastAddr,
 		data:    b,
 	}
 	c.cNode.pollCh <- packet.ArtPollPacket{}
@@ -172,7 +171,7 @@ func (c *Controller) pollLoop() {
 		case <-c.pollTicker.C:
 			// send ArtPollPacket
 			c.cNode.sendCh <- netPayload{
-				address: broadcastAddr,
+				address: c.cNode.broadcastAddr,
 				data:    b,
 			}
 			c.cNode.pollCh <- packet.ArtPollPacket{}
@@ -294,7 +293,7 @@ func (c *Controller) updateNode(cfg NodeConfig) error {
 	defer c.nodeLock.Unlock()
 
 	for i := range c.Nodes {
-		if bytes.Equal(cfg.IP, c.Nodes[i].Node.IP) {
+		if net.IP.Equal(cfg.IP, c.Nodes[i].Node.IP) {
 			// update this node, since we already know about it
 			c.log.With(Fields{"node": cfg.Name, "ip": cfg.IP.String()}).Debug("updated node")
 			// remove references to this node from the output map
@@ -351,7 +350,7 @@ func (c *Controller) deleteNode(node NodeConfig) error {
 	defer c.nodeLock.Unlock()
 
 	for i := range c.Nodes {
-		if bytes.Equal(node.IP, c.Nodes[i].Node.IP) {
+		if net.IP.Equal(node.IP, c.Nodes[i].Node.IP) {
 			// node found, remove it from the list
 			// remove references to this node from the output map
 			for _, port := range c.Nodes[i].Node.OutputPorts {
