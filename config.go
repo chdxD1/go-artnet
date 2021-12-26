@@ -34,6 +34,14 @@ func (a Address) PortAddress() int {
 	return int(a.SubUni & 0x0f)
 }
 
+// Address from absolute universe address
+func AddressFromInt(address uint16) Address {
+	return Address{
+		Net:    uint8((address & 0x7f00) >> 8),
+		SubUni: uint8(address & 0x00ff),
+	}
+}
+
 // InputPort contains information for an input port
 type InputPort struct {
 	Address Address
